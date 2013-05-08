@@ -68,6 +68,50 @@ class AuthQuery : public SQLQuery
 	}
 };
 
+class BCryptAuthQuery : public AuthQuery
+{
+public:
+	BCryptAuthQuery(Module* me, const std::string& u, const std::string& pwd, LocalIntExt& e, bool v)
+		: AuthQuery(me, u, e, v), password(pwd)
+	{
+	}
+
+	void OnResult(SQLResult& res)
+	{
+		User* user = ServerInstance->FindNick(uid);
+		if (user)
+		{
+			SQLEntries row;
+			if (res.Rows() && res.GetRow(row) && Authenticate(row[0]))
+			{
+				pendingExt.set(user, AUTH_STATE_NONE);
+			}
+			else
+			{
+				pendingExt.set(user, AUTH_STATE_FAIL);
+			}
+		}
+	}
+
+private:
+	bool Authenticate(const std::string& hash)
+	{
+		HashProvider* bcrypt = ServerInstance->Modules->FindDataService<HashProvider>("hash/bcrypt");
+		if (bcrypt)
+		{
+			const std::string salt = hash.substr(0, 29);
+
+			return bcrypt->sum(salt + password) == hash;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	const std::string password;
+};
+
 class ModuleSQLAuth : public Module
 {
 	LocalIntExt pendingExt;
@@ -77,6 +121,7 @@ class ModuleSQLAuth : public Module
 	std::string killreason;
 	std::string allowpattern;
 	bool verbose;
+	bool usebcrypt;
 
  public:
 	ModuleSQLAuth() : pendingExt("sqlauth-wait", this), SQL(this, "SQL")
@@ -103,6 +148,7 @@ class ModuleSQLAuth : public Module
 		killreason = conf->getString("killreason");
 		allowpattern = conf->getString("allowpattern");
 		verbose = conf->getBool("verbose");
+		usebcrypt = conf->getBool("usebcrypt");
 	}
 
 	ModResult OnUserRegister(LocalUser* user)
@@ -139,7 +185,17 @@ class ModuleSQLAuth : public Module
 		if (sha256)
 			userinfo["sha256pass"] = sha256->hexsum(user->password);
 
-		SQL->submit(new AuthQuery(this, user->uuid, pendingExt, verbose), freeformquery, userinfo);
+		AuthQuery* authQuery = NULL;
+		if (usebcrypt)
+		{
+			authQuery = new BCryptAuthQuery(this, user->uuid, user->password, pendingExt, verbose);
+		}
+		else
+		{
+			authQuery = new AuthQuery(this, user->uuid, pendingExt, verbose);
+		}
+
+		SQL->submit(authQuery, freeformquery, userinfo);
 
 		return MOD_RES_PASSTHRU;
 	}
